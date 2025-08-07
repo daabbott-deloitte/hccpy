@@ -1,5 +1,8 @@
 import numpy as np
+import pandas as pd
 import re
+import time
+import psutil
 from collections import Counter
 import hccpy.utils as utils
 import hccpy._V22I0ED2 as V22I0ED2 # age sex edits (v22, v23, v24)
@@ -13,6 +16,17 @@ import hccpy._AGESEXV2 as AGESEXV2 # disabled/origds (v22, v23, v24, v28)
 import hccpy._V2218O1P as V2218O1P # risk coefn (v22, v23, v24, v28)
 import hccpy._E2118P1P as E2118P1P # risk coefn for ESRD
 
+from scipy.sparse import csr_matrix
+from pandarallel import pandarallel
+
+def sufficient_memory(df):
+    available_gb = psutil.virtual_memory().available / (1024 ** 3)
+    print(f"Available memory: {available_gb:.2f} GB")
+    # the threshold_gb is calculated based on memory_usage in memory_profiler library that
+    # 22M benes requires around 146GB available memory to run hccpy with parallel_apply
+    threshold_gb = (df.shape[0]/1000000)*7
+    print(f"Required memory: {threshold_gb:.2f} GB")
+    return available_gb >= threshold_gb
 
 class HCCEngine:
 
@@ -154,6 +168,95 @@ class HCCEngine:
             sex = smap[sex.lower()]
         return sex
 
+    def _lst_to_dct(self, dx_lst):
+        cc_dct = {}
+        for dx in dx_lst:
+            dx = dx.strip().upper().replace(".","")
+            if dx in self.dx2cc:
+                cc_dct[dx] = self.dx2cc[dx]
+        return cc_dct
+
+    def df_profile(self, df, num_chunks=2, nb_workers=None):
+        """Returns the HCC risk profile of a group of patients in a datafrmae.
+        The calculation is based on profile fucntion, and we only yield a portion
+        of profile function output here to save running time
+        
+        Parameters
+        ----------
+        df: dataframe which contains dx_lst, age, sex, elig, orec, medicaid
+        num_chunks: number of chunks you would like to divide df into, higher num_chunks 
+                    doesn't mean you can run things faster, depends on your resource
+        nb_workers: number of workers you would like to run in parallel
+        """
+
+        # check available cpu memory before running hccpy in parallel
+        if not sufficient_memory(df):
+            print("There is not enough memory to run parallel_apply efficiently, \
+                    please release unused memory or use instance with more cpu memory.")
+            return None
+
+        # inintialize pandarallel with nb_workers
+        if nb_workers is None:
+            pandarallel.initialize(progress_bar=False)
+        else:
+            pandarallel.initialize(progress_bar=False, nb_workers=nb_workers)
+
+        previous = time.time()
+        result = []
+        # divide dataframe into num_chunks of small dataframe
+        chunk_size = (len(df) + num_chunks - 1) // num_chunks
+        for i in range(0, len(df), chunk_size):
+            chunk = df.iloc[i:i + chunk_size].copy()
+            chunk['sex'] = chunk['sex'].parallel_apply(self._sexmap)
+            chunk[['disabled', 'origds', 'elig']] = chunk[['age','orec','medicaid','elig']].\
+                parallel_apply(lambda x:AGESEXV2.get_ds(x['age'], x['orec'], x['medicaid'],\
+                                                        x['elig']),axis=1).tolist()
+            chunk['cc_dct'] = chunk['dx_lst'].parallel_apply(self._lst_to_dct)
+            chunk.drop(columns=['dx_lst'],inplace=True)
+            if self.version == "28":
+                chunk['cc_dct'] = chunk[['cc_dct','age','sex']].parallel_apply(\
+                    lambda x:V28I0ED1.apply_agesex_edits(x['cc_dct'], x['age'], x['sex']),axis=1)
+            else:
+                chunk['cc_dct'] = chunk[['cc_dct','age','sex']].parallel_apply(\
+                    lambda x:V22I0ED2.apply_agesex_edits(x['cc_dct'], x['age'], x['sex']),axis=1)
+            chunk['hcc_lst'] = chunk[['cc_dct','age','sex']].parallel_apply(\
+                    lambda x:self._apply_hierarchy(x['cc_dct'], x['age'], x['sex']),axis=1)
+            chunk['hcc_lst'] = chunk[['hcc_lst','age','disabled']].parallel_apply(\
+                    lambda x:self._apply_interactions(x['hcc_lst'], x['age'], x['disabled']),axis=1)
+    
+            if "ESRD" not in self.version:
+                chunk['hcc_age_lst'] = chunk[['hcc_lst','age','sex','elig','origds','medicaid']].\
+                    parallel_apply(lambda x:V2218O1P.get_risk_dct(self.coefn,\
+                    x['hcc_lst'],x['age'],x['sex'],x['elig'], x['origds'], x['medicaid'], True),axis=1)
+            else:
+                chunk['hcc_age_lst'] = chunk[['hcc_lst','age','sex','elig','origds','medicaid']].\
+                    parallel_apply(lambda x:E2118P1P.get_risk_dct(self.coefn,\
+                    x['hcc_lst'],x['age'],x['sex'],x['elig'], x['origds'], x['medicaid'], True),axis=1)
+            result.append(chunk)
+        df = pd.concat(result)
+
+        # create sparse matrix
+        all_columns = list(self.coefn.keys())
+        col_to_index = {col: i for i, col in enumerate(all_columns)}
+        row_indices = []
+        col_indices = []
+        data = []
+        for row_idx, active_cols in enumerate(df['hcc_age_lst']):
+            for col in active_cols:
+                if col in col_to_index:
+                    row_indices.append(row_idx)
+                    col_indices.append(col_to_index[col])
+                    data.append(1)
+        sparse_mat = csr_matrix((data, (row_indices, col_indices)),\
+                                shape=(len(df['hcc_age_lst']), len(all_columns)))
+        coeff = list(self.coefn.values())
+        # calculate risk score with matrix multiplication
+        df['risk_score'] = sparse_mat.dot(coeff)
+        df.drop(columns=['hcc_age_lst'], inplace=True)
+        now = time.time()
+        print(f"total time cost to run hccpy: {now - previous:.6f} seconds")
+        return df
+
     def profile(self, dx_lst, age=70, sex="M", 
                     elig="CNA", orec="0", medicaid=False):
         """Returns the HCC risk profile of a given patient information.
@@ -233,7 +336,7 @@ class HCCEngine:
                 "risk_score_adj": score_adj,
                 "risk_score_age_adj": score_age_adj,
                 "details": risk_dct,
-                "hcc_lst": hcc_lst,    # HCC list before interactions
+                "hcc_lst": hcc_lst,    # HCC list after interactions
                 "hcc_map": cc_dct,     # before applying hierarchy
                 "parameters": {
                     "age": age,
