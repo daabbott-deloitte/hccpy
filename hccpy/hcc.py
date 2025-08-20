@@ -18,15 +18,20 @@ import hccpy._E2118P1P as E2118P1P  # risk coefn for ESRD
 
 from scipy.sparse import csr_matrix
 from pandarallel import pandarallel
+import logging
+
+FORMAT = "%(asctime)s %(message)s"
+logging.basicConfig(format=FORMAT)
+logging.getLogger().setLevel("INFO")
 
 
 def sufficient_memory(df):
     available_gb = psutil.virtual_memory().available / (1024**3)
-    print(f"Available memory: {available_gb:.2f} GB")
+    logging.info(f"Available memory: {available_gb:.2f} GB")
     # the threshold_gb is calculated based on memory_usage in memory_profiler library that
     # 22M benes requires around 146GB available memory to run hccpy with parallel_apply
     threshold_gb = (df.shape[0] / 1000000) * 7
-    print(f"Required memory: {threshold_gb:.2f} GB")
+    logging.info(f"Required memory: {threshold_gb:.2f} GB")
     return available_gb >= threshold_gb
 
 
@@ -202,7 +207,7 @@ class HCCEngine:
 
         # check available cpu memory before running hccpy in parallel
         if not sufficient_memory(df):
-            print(
+            logging.info(
                 "There is not enough memory to run parallel_apply efficiently, \
                     please release unused memory or use instance with more cpu memory."
             )
@@ -313,7 +318,7 @@ class HCCEngine:
         df["risk_score"] = sparse_mat.dot(coeff)
         df.drop(columns=["hcc_age_lst"], inplace=True)
         now = time.time()
-        print(f"total time cost to run hccpy: {now - previous:.6f} seconds")
+        logging.info(f"total time cost to run hccpy: {now - previous:.6f} seconds")
         return df
 
     def profile(self, dx_lst, age=70, sex="M", elig="CNA", orec="0", medicaid=False):

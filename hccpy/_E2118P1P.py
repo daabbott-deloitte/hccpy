@@ -1,4 +1,3 @@
-
 def get_risk_dct(coefn, hcc_lst, age, sex, list_output=False):
 
     if list_output:
@@ -9,21 +8,21 @@ def get_risk_dct(coefn, hcc_lst, age, sex, list_output=False):
     # build demographic bracket strings and add to risk_dct
     # NOTE: Need modifications to classify New Enrollees in the future
     # NOTE: Functioning Graft model not included as well. Need improvement.
-    elig_demo = "DI_" # dialysis status
+    elig_demo = "DI_"  # dialysis status
     elig_demo += sex
 
     # build age bracket strings and add to risk_dct
     age_ranges = [x for x in coefn.keys() if elig_demo in x]
     age_match = ""
     for age_range in age_ranges:
-        age_tokens = age_range.replace(elig_demo, "").split("_") 
-        lb, ub = 0, 999 
+        age_tokens = age_range.replace(elig_demo, "").split("_")
+        lb, ub = 0, 999
         if len(age_tokens) == 1:
             lb = int(age_tokens[0])
             ub = lb + 1
         elif age_tokens[1] == "GT":
             lb = int(age_tokens[0])
-        else: 
+        else:
             lb = int(age_tokens[0])
             ub = int(age_tokens[1]) + 1
         if lb <= age < ub:
@@ -33,11 +32,11 @@ def get_risk_dct(coefn, hcc_lst, age, sex, list_output=False):
         hcc_age_lst.append(age_match)
     else:
         risk_dct[age_match] = coefn.get(age_match, 0.0)
-    
+
     # build hcc factor strings and add to risk_dict
     for hcc in hcc_lst:
         # NOTE: Other Eligibilities are not implemented
-        # DI: dialysis model 
+        # DI: dialysis model
         # DNE: dialysis new enrollees
         # GC: graft community model
         # GI: graft institutional model
@@ -52,4 +51,3 @@ def get_risk_dct(coefn, hcc_lst, age, sex, list_output=False):
         return hcc_age_lst
     else:
         return risk_dct
-
