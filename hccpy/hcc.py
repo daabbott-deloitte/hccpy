@@ -39,7 +39,7 @@ class HCCEngine:
 
     def __init__(
         self,
-        version="24",
+        version="28",
         dx2cc_year="Combined",
         cif=0.059,  # coding intensity factor.
         norm_params={"C": 1.015, "D": 1.022, "G": 1.028},  # please see the note below.
@@ -192,9 +192,26 @@ class HCCEngine:
                 cc_dct[dx] = self.dx2cc[dx]
         return cc_dct
 
-    def df_profile(self, df, num_chunks=2, nb_workers=None):
+    def profile(self, *args, **kwargs):
+        if args:
+            first_arg = args[0]
+        elif "dx_lst" in kwargs:
+            first_arg = kwargs["dx_lst"]
+        elif "df" in kwargs:
+            first_arg = kwargs["df"]
+        else:
+            raise ValueError("No recognizable input provided.")
+
+        if isinstance(first_arg, pd.DataFrame):
+            return self._df_profile(*args, **kwargs)
+        elif isinstance(first_arg, list):
+            return self._list_profile(*args, **kwargs)
+        else:
+            raise TypeError("Unsupported input type.")
+
+    def _df_profile(self, df, num_chunks=2, nb_workers=None):
         """Returns the HCC risk profile of a group of patients in a datafrmae.
-        The calculation is based on profile fucntion, and we only yield a portion
+        The calculation is based on profile function, and we only yield a portion
         of profile function output here to save running time
 
         Parameters
@@ -206,12 +223,10 @@ class HCCEngine:
         """
 
         # check available cpu memory before running hccpy in parallel
-        if not sufficient_memory(df):
-            logging.info(
-                "There is not enough memory to run parallel_apply efficiently, \
-                    please release unused memory or use instance with more cpu memory."
-            )
-            return None
+        assert sufficient_memory(
+            df
+        ), "There is not enough memory to run parallel_apply efficiently, \
+                please release unused memory or use instance with more cpu memory."
 
         # inintialize pandarallel with nb_workers
         if nb_workers is None:
@@ -321,7 +336,9 @@ class HCCEngine:
         logging.info(f"total time cost to run hccpy: {now - previous:.6f} seconds")
         return df
 
-    def profile(self, dx_lst, age=70, sex="M", elig="CNA", orec="0", medicaid=False):
+    def _list_profile(
+        self, dx_lst, age=70, sex="M", elig="CNA", orec="0", medicaid=False
+    ):
         """Returns the HCC risk profile of a given patient information.
 
         Parameters

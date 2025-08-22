@@ -51,7 +51,7 @@ def he_28():
 def test_run_hcc(he_28):
     global df
     df1 = df.apply(lambda row: calc_hccpy(row, he_28), axis=1)
-    df2 = he_28.df_profile(df)
+    df2 = he_28.profile(df)
     assert len(df1) == len(df2), "the output row number mismatch"
     assert (df1["risk_score"] == df2["risk_score"]).all(), "the risk score is not equal"
     assert all(
