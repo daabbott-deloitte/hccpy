@@ -8,24 +8,36 @@ import pytest
 import pandas as pd
 from hccpy.hcc import HCCEngine
 
-data = {
-    0: [
-        ["L988", "Z96653", "L97429", "B351", "L97419", "M109"],
-        80,
-        "F",
-        "CNA",
-        1,
-        False,
-    ],
-    1: [["L84", "B351", "M109", "M2041", "D8687", "E083211"], 72, "M", "INS", 0, False],
-    2: [["D122", "M25473", "D6859", "F13181"], 65, "M", "CPD", 0, True],
-    3: [["D591"], 60, "M", "CPD", 0, True],
-    4: [["G111"], 55, "F", "CPA", 0, False],
-}
 
-df = pd.DataFrame.from_dict(
-    data, orient="index", columns=["dx_lst", "age", "sex", "elig", "orec", "medicaid"]
-)
+@pytest.fixture
+def df():
+    data = {
+        0: [
+            ["L988", "Z96653", "L97429", "B351", "L97419", "M109"],
+            80,
+            "F",
+            "CNA",
+            1,
+            False,
+        ],
+        1: [
+            ["L84", "B351", "M109", "M2041", "D8687", "E083211"],
+            72,
+            "M",
+            "INS",
+            0,
+            False,
+        ],
+        2: [["D122", "M25473", "D6859", "F13181"], 65, "M", "CPD", 0, True],
+        3: [["D591"], 60, "M", "CPD", 0, True],
+        4: [["G111"], 55, "F", "CPA", 0, False],
+    }
+    dataframe = pd.DataFrame.from_dict(
+        data,
+        orient="index",
+        columns=["dx_lst", "age", "sex", "elig", "orec", "medicaid"],
+    )
+    return dataframe
 
 
 def calc_hccpy(
@@ -55,13 +67,12 @@ def he_updated_mapping():
     return HCCEngine("28", dx2cc_year="2024_FY21FY22")
 
 
-def test_run_hcc(he_28):
+def test_run_hcc(he_28, df):
     """
     This function tests that the df_profile() which take dataframe as input and
     run hccpy in parallel can achieve the same result as profile() which calculate
     risk score and hcc_list bene by bene.
     """
-    global df
     df1 = df.apply(lambda row: calc_hccpy(row, he_28), axis=1)
     df2 = he_28.profile(df)
     assert len(df1) == len(df2), "the output row number mismatch"
@@ -73,12 +84,11 @@ def test_run_hcc(he_28):
     ), "the generated hcc_lst is not the same"
 
 
-def test_updated_mapping(he_28, he_updated_mapping):
+def test_updated_mapping(he_28, he_updated_mapping, df):
     """
     This function tests that the updated mapping file could handle deprecated
     deleted code properly and map to expected HCC accordingly
     """
-    global df
     df1 = he_28.profile(df)
     assert len(df1.iloc[3]["hcc_lst"]) == 0, "Dx code D591 is not a deleted code"
     assert len(df1.iloc[4]["hcc_lst"]) == 0, "Dx code G111 is not a deleted code"
@@ -91,12 +101,11 @@ def test_updated_mapping(he_28, he_updated_mapping):
     ), "Deleted dx code G111 is not handled properly"
 
 
-def test_missing_demo_features(he_28):
+def test_missing_demo_features(he_28, df):
     """
     This function tests that the hccpy function would raise TypeError if miss any demo features
     or contain Null value in the dataframe
     """
-    global df
     with pytest.raises(TypeError):
         he_28.profile(dx_lst=["L988", "Z96653"])
     df_copy = df.copy()

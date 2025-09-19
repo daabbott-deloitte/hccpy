@@ -62,10 +62,8 @@ class HCCEngine:
         #           Y2024, {"D": 1.022,  "G": 1.028}
 
         logging.info("Start running hccpy")
-        if logging_mode == "DEBUG":
-            logging.getLogger().setLevel(logging.DEBUG)
-        else:
-            logging.getLogger().setLevel(logging.INFO)
+        set_logging_model = logging.DEBUG if logging_mode == "DEBUG" else logging.INFO
+        logging.getLogger().setLevel(set_logging_model)
 
         fnmaps = {
             "22": {
@@ -236,12 +234,13 @@ class HCCEngine:
         # check available cpu memory before running hccpy in parallel
         assert sufficient_memory(
             df
-        ), "There is not enough memory to run parallel_apply efficiently, \
-        please release unused memory or use instance with more cpu memory."
+        ), "There is not enough RAM to run parallel_apply efficiently, \
+        please release unused RAM or use instance with more RAM."
 
         assert (
             not df.isnull().values.any()
-        ), "There is Null value in this dataframe, please address it in preprocessing."
+        ), "One or more null values have been found in this DataFrame. \
+        Please address this during preprocessing"
 
         # inintialize pandarallel with nb_workers
         if nb_workers is None:
