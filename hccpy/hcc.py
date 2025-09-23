@@ -22,7 +22,6 @@ import logging
 
 FORMAT = "%(asctime)s %(message)s"
 logging.basicConfig(format=FORMAT)
-logging.getLogger().setLevel("INFO")
 
 
 def sufficient_memory(df):
@@ -43,6 +42,7 @@ class HCCEngine:
         dx2cc_year="Combined",
         cif=0.059,  # coding intensity factor.
         norm_params={"C": 1.015, "D": 1.022, "G": 1.028},  # please see the note below.
+        logging_mode="INFO",
     ):
         # NOTE: contributed/inspired by @ronnie-canopy
         #       modified by @yubin-park, for backward compatibility and
@@ -60,6 +60,10 @@ class HCCEngine:
         # ESRDv21, Y2022, {"D": 1.077, "G": 1.126}
         #           Y2023, {"D": 1.034, "G": 1.048}
         #           Y2024, {"D": 1.022,  "G": 1.028}
+
+        logging.info("Start running hccpy")
+        set_logging_model = logging.DEBUG if logging_mode == "DEBUG" else logging.INFO
+        logging.getLogger().setLevel(set_logging_model)
 
         fnmaps = {
             "22": {
@@ -100,8 +104,11 @@ class HCCEngine:
                 "hier": "data/V24H86H1.TXT",
             },
             "28": {
-                "dx2cc": {"2024": "data/F2824T1N.TXT", "Combined": "data/F2824T1N.TXT",
-                         "2024_FY21FY22": "data/F2824T1N_FY21FY22.TXT"},
+                "dx2cc": {
+                    "2024": "data/F2824T1N.TXT",
+                    "Combined": "data/F2824T1N.TXT",
+                    "2024_FY21FY22": "data/F2824T1N_FY21FY22.TXT",
+                },
                 "coefn": "data/V28hcccoefn.csv",
                 "label": "data/V28115L3.TXT",
                 "hier": "data/V28115H1.TXT",
@@ -127,6 +134,7 @@ class HCCEngine:
         self.label_short = {}
         if "label_short" in fnmaps[version]:
             self.label_short = utils.read_label_short(fnmaps[version]["label_short"])
+        logging.debug("Complete loading prerequisite files for hccpy")
 
     def _apply_hierarchy(self, cc_dct, age, sex):
         """Returns a list of HCCs after applying hierarchy and age/sex edit"""
@@ -226,8 +234,13 @@ class HCCEngine:
         # check available cpu memory before running hccpy in parallel
         assert sufficient_memory(
             df
-        ), "There is not enough memory to run parallel_apply efficiently, \
-                please release unused memory or use instance with more cpu memory."
+        ), "There is not enough RAM to run parallel_apply efficiently, \
+        please release unused RAM or use instance with more RAM."
+
+        assert (
+            not df.isnull().values.any()
+        ), "One or more null values have been found in this DataFrame. \
+        Please address this during preprocessing"
 
         # inintialize pandarallel with nb_workers
         if nb_workers is None:
@@ -240,7 +253,9 @@ class HCCEngine:
         # divide dataframe into num_chunks of small dataframe
         chunk_size = (len(df) + num_chunks - 1) // num_chunks
         for i in range(0, len(df), chunk_size):
+            logging.debug(f"Running for chunk {int(i/chunk_size)}...")
             chunk = df.iloc[i : i + chunk_size].copy()
+            logging.debug("apply sex map")
             chunk["sex"] = chunk["sex"].parallel_apply(self._sexmap)
             chunk[["disabled", "origds", "elig"]] = (
                 chunk[["age", "orec", "medicaid", "elig"]]
@@ -252,8 +267,10 @@ class HCCEngine:
                 )
                 .tolist()
             )
+            logging.debug("lst_to_dct for dx_lst")
             chunk["cc_dct"] = chunk["dx_lst"].parallel_apply(self._lst_to_dct)
             chunk.drop(columns=["dx_lst"], inplace=True)
+            logging.debug("edits for age and sex")
             if self.version == "28":
                 chunk["cc_dct"] = chunk[["cc_dct", "age", "sex"]].parallel_apply(
                     lambda x: V28I0ED1.apply_agesex_edits(
@@ -268,16 +285,18 @@ class HCCEngine:
                     ),
                     axis=1,
                 )
+            logging.debug("apply hierarchy")
             chunk["hcc_lst"] = chunk[["cc_dct", "age", "sex"]].parallel_apply(
                 lambda x: self._apply_hierarchy(x["cc_dct"], x["age"], x["sex"]), axis=1
             )
+            logging.debug("apply interactions")
             chunk["hcc_lst"] = chunk[["hcc_lst", "age", "disabled"]].parallel_apply(
                 lambda x: self._apply_interactions(
                     x["hcc_lst"], x["age"], x["disabled"]
                 ),
                 axis=1,
             )
-
+            logging.debug("get hcc_age_lst")
             if "ESRD" not in self.version:
                 chunk["hcc_age_lst"] = chunk[
                     ["hcc_lst", "age", "sex", "elig", "origds", "medicaid"]
@@ -313,6 +332,7 @@ class HCCEngine:
             result.append(chunk)
         df = pd.concat(result)
 
+        logging.debug("sparse matrix multiplication to get risk score")
         # create sparse matrix
         all_columns = list(self.coefn.keys())
         col_to_index = {col: i for i, col in enumerate(all_columns)}
@@ -335,11 +355,10 @@ class HCCEngine:
         df.drop(columns=["hcc_age_lst"], inplace=True)
         now = time.time()
         logging.info(f"total time cost to run hccpy: {now - previous:.6f} seconds")
+        logging.debug("Finish running hccpy")
         return df
 
-    def _list_profile(
-        self, dx_lst, age=70, sex="M", elig="CNA", orec="0", medicaid=False
-    ):
+    def _list_profile(self, dx_lst, age, sex, elig, orec, medicaid):
         """Returns the HCC risk profile of a given patient information.
 
         Parameters
