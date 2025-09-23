@@ -136,11 +136,14 @@ class HCCEngine:
             self.label_short = utils.read_label_short(fnmaps[version]["label_short"])
         logging.debug("Complete loading prerequisite files for hccpy")
 
-    def _apply_hierarchy(self, cc_dct, age, sex):
+    def _apply_hierarchy(self, cc, age, sex, cc_direct=False):
         """Returns a list of HCCs after applying hierarchy and age/sex edit"""
-        cc_lst_all = []
-        for dx, cc_lst in cc_dct.items():
-            cc_lst_all += [cc for cc in cc_lst if cc != "HCCNA"]
+        if not cc_direct:
+            cc_lst_all = []
+            for dx, cc_lst in cc.items():
+                cc_lst_all += [cc for cc in cc_lst if cc != "HCCNA"]
+        else:
+            cc_lst_all = cc
         cc_cnt = Counter(set(cc_lst_all))
 
         if self.version == "28":  # V28 weird patch for heart
@@ -204,12 +207,12 @@ class HCCEngine:
     def profile(self, *args, **kwargs):
         if args:
             first_arg = args[0]
-        elif "dx_lst" in kwargs:
-            first_arg = kwargs["dx_lst"]
+        elif "code_lst" in kwargs:
+            first_arg = kwargs["code_lst"]
         elif "df" in kwargs:
             first_arg = kwargs["df"]
         else:
-            raise ValueError("No recognizable input provided.")
+            raise ValueError("Unrecognized input: the first argument must be one of df or code_lst")
 
         if isinstance(first_arg, pd.DataFrame):
             return self._df_profile(*args, **kwargs)
@@ -218,14 +221,14 @@ class HCCEngine:
         else:
             raise TypeError("Unsupported input type.")
 
-    def _df_profile(self, df, num_chunks=2, nb_workers=None):
+    def _df_profile(self, df, cc_direct=False, num_chunks=2, nb_workers=None):
         """Returns the HCC risk profile of a group of patients in a datafrmae.
         The calculation is based on profile function, and we only yield a portion
         of profile function output here to save running time
 
         Parameters
         ----------
-        df: dataframe which contains dx_lst, age, sex, elig, orec, medicaid
+        df: dataframe which contains age, sex, elig, orec, medicaid, dx_lst or cc_lst
         num_chunks: number of chunks you would like to divide df into, higher num_chunks
                     doesn't mean you can run things faster, depends on your resource
         nb_workers: number of workers you would like to run in parallel
@@ -234,13 +237,20 @@ class HCCEngine:
         # check available cpu memory before running hccpy in parallel
         assert sufficient_memory(
             df
-        ), "There is not enough RAM to run parallel_apply efficiently, \
-        please release unused RAM or use instance with more RAM."
+        ), "Not enough RAM to run parallel_apply efficiently, please release unused RAM or use instance with more RAM."
+
+        required_columns = ["age", "sex", "elig", "orec", "medicaid"]
+        optional_columns = ["dx_lst", "cc_lst"]
+        assert all(
+            col in df.columns for col in required_columns
+        ), f"Missing columns: {[col for col in required_columns if col not in df.columns]}"
+        assert any(
+            col in df.columns for col in optional_columns
+        ), f"At least one of {optional_columns} must be present"
 
         assert (
             not df.isnull().values.any()
-        ), "One or more null values have been found in this DataFrame. \
-        Please address this during preprocessing"
+        ), "One or more null values have been found in this DataFrame. Please address this during preprocessing"
 
         # inintialize pandarallel with nb_workers
         if nb_workers is None:
@@ -267,28 +277,41 @@ class HCCEngine:
                 )
                 .tolist()
             )
-            logging.debug("lst_to_dct for dx_lst")
-            chunk["cc_dct"] = chunk["dx_lst"].parallel_apply(self._lst_to_dct)
-            chunk.drop(columns=["dx_lst"], inplace=True)
-            logging.debug("edits for age and sex")
-            if self.version == "28":
-                chunk["cc_dct"] = chunk[["cc_dct", "age", "sex"]].parallel_apply(
-                    lambda x: V28I0ED1.apply_agesex_edits(
-                        x["cc_dct"], x["age"], x["sex"]
-                    ),
+            if not cc_direct:
+                logging.debug("lst_to_dct for dx_lst")
+                chunk["cc_dct"] = chunk["dx_lst"].parallel_apply(self._lst_to_dct)
+                chunk.drop(columns=["dx_lst"], inplace=True)
+                logging.debug("edits for age and sex")
+                if self.version == "28":
+                    chunk["cc_dct"] = chunk[["cc_dct", "age", "sex"]].parallel_apply(
+                        lambda x: V28I0ED1.apply_agesex_edits(
+                            x["cc_dct"], x["age"], x["sex"]
+                        ),
+                        axis=1,
+                    )
+                else:
+                    chunk["cc_dct"] = chunk[["cc_dct", "age", "sex"]].parallel_apply(
+                        lambda x: V22I0ED2.apply_agesex_edits(
+                            x["cc_dct"], x["age"], x["sex"]
+                        ),
+                        axis=1,
+                    )
+            else:
+                logging.debug("skip step to convert dx to cc")
+            logging.debug("apply hierarchy")
+            if not cc_direct:
+                chunk["hcc_lst"] = chunk[["cc_dct", "age", "sex"]].parallel_apply(
+                    lambda x: self._apply_hierarchy(x["cc_dct"], x["age"], x["sex"]),
                     axis=1,
                 )
             else:
-                chunk["cc_dct"] = chunk[["cc_dct", "age", "sex"]].parallel_apply(
-                    lambda x: V22I0ED2.apply_agesex_edits(
-                        x["cc_dct"], x["age"], x["sex"]
+                # todo: need to get the right cc_lst column name here:
+                chunk["hcc_lst"] = chunk[["cc_lst", "age", "sex"]].parallel_apply(
+                    lambda x: self._apply_hierarchy(
+                        x["cc_lst"], x["age"], x["sex"], cc_direct
                     ),
                     axis=1,
                 )
-            logging.debug("apply hierarchy")
-            chunk["hcc_lst"] = chunk[["cc_dct", "age", "sex"]].parallel_apply(
-                lambda x: self._apply_hierarchy(x["cc_dct"], x["age"], x["sex"]), axis=1
-            )
             logging.debug("apply interactions")
             chunk["hcc_lst"] = chunk[["hcc_lst", "age", "disabled"]].parallel_apply(
                 lambda x: self._apply_interactions(
@@ -358,13 +381,13 @@ class HCCEngine:
         logging.debug("Finish running hccpy")
         return df
 
-    def _list_profile(self, dx_lst, age, sex, elig, orec, medicaid):
+    def _list_profile(self, code_lst, age, sex, elig, orec, medicaid, cc_direct=False):
         """Returns the HCC risk profile of a given patient information.
 
         Parameters
         ----------
-        dx_lst : list of str
-                 A list of ICD10 codes for the measurement year.
+        code_lst : list of str
+                 A list of ICD10 codes or CC codes for the measurement year.
         age : int or float
               The age of the patient.
         sex : str
@@ -394,13 +417,16 @@ class HCCEngine:
         sex = self._sexmap(sex)
         disabled, origds, elig = AGESEXV2.get_ds(age, orec, medicaid, elig)
 
-        dx_set = {dx.strip().upper().replace(".", "") for dx in dx_lst}
-        cc_dct = {dx: self.dx2cc[dx] for dx in dx_set if dx in self.dx2cc}
-        if self.version == "28":
-            cc_dct = V28I0ED1.apply_agesex_edits(cc_dct, age, sex)
+        if not cc_direct:
+            dx_set = {dx.strip().upper().replace(".", "") for dx in code_lst}
+            cc_dct = {dx: self.dx2cc[dx] for dx in dx_set if dx in self.dx2cc}
+            if self.version == "28":
+                cc_dct = V28I0ED1.apply_agesex_edits(cc_dct, age, sex)
+            else:
+                cc_dct = V22I0ED2.apply_agesex_edits(cc_dct, age, sex)
+            hcc_lst = self._apply_hierarchy(cc_dct, age, sex)
         else:
-            cc_dct = V22I0ED2.apply_agesex_edits(cc_dct, age, sex)
-        hcc_lst = self._apply_hierarchy(cc_dct, age, sex)
+            hcc_lst = self._apply_hierarchy(code_lst, age, sex, cc_direct)
         hcc_lst = self._apply_interactions(hcc_lst, age, disabled)
         if "ESRD" not in self.version:
             risk_dct = V2218O1P.get_risk_dct(
@@ -439,7 +465,7 @@ class HCCEngine:
             "risk_score_age_adj": score_age_adj,
             "details": risk_dct,
             "hcc_lst": hcc_lst,  # HCC list after interactions
-            "hcc_map": cc_dct,  # before applying hierarchy
+            # "hcc_map": cc_dct,  # before applying hierarchy
             "parameters": {
                 "age": age,
                 "sex": sex,
@@ -450,6 +476,8 @@ class HCCEngine:
             },
             "model": self.version,
         }
+        if not cc_direct:
+            out.update({"hcc_map": cc_dct})
         return out
 
     def describe_hcc(self, cc):
