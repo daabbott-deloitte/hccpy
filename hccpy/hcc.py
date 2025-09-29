@@ -207,12 +207,12 @@ class HCCEngine:
     def profile(self, *args, **kwargs):
         if args:
             first_arg = args[0]
-        elif "code_lst" in kwargs:
-            first_arg = kwargs["code_lst"]
+        elif "dx_lst" in kwargs:
+            first_arg = kwargs["dx_lst"]
         elif "df" in kwargs:
             first_arg = kwargs["df"]
         else:
-            raise ValueError("Unrecognized input: the first argument must be one of df or code_lst")
+            raise ValueError("Unrecognized input: the first argument must be one of df or dx_lst")
 
         if isinstance(first_arg, pd.DataFrame):
             return self._df_profile(*args, **kwargs)
@@ -381,12 +381,12 @@ class HCCEngine:
         logging.debug("Finish running hccpy")
         return df
 
-    def _list_profile(self, code_lst, age, sex, elig, orec, medicaid, cc_direct=False):
+    def _list_profile(self, dx_lst, age, sex, elig, orec, medicaid, cc_direct=False):
         """Returns the HCC risk profile of a given patient information.
 
         Parameters
         ----------
-        code_lst : list of str
+        dx_lst : list of str
                  A list of ICD10 codes or CC codes for the measurement year.
         age : int or float
               The age of the patient.
@@ -418,7 +418,7 @@ class HCCEngine:
         disabled, origds, elig = AGESEXV2.get_ds(age, orec, medicaid, elig)
 
         if not cc_direct:
-            dx_set = {dx.strip().upper().replace(".", "") for dx in code_lst}
+            dx_set = {dx.strip().upper().replace(".", "") for dx in dx_lst}
             cc_dct = {dx: self.dx2cc[dx] for dx in dx_set if dx in self.dx2cc}
             if self.version == "28":
                 cc_dct = V28I0ED1.apply_agesex_edits(cc_dct, age, sex)
@@ -426,7 +426,7 @@ class HCCEngine:
                 cc_dct = V22I0ED2.apply_agesex_edits(cc_dct, age, sex)
             hcc_lst = self._apply_hierarchy(cc_dct, age, sex)
         else:
-            hcc_lst = self._apply_hierarchy(code_lst, age, sex, cc_direct)
+            hcc_lst = self._apply_hierarchy(dx_lst, age, sex, cc_direct)
         hcc_lst = self._apply_interactions(hcc_lst, age, disabled)
         if "ESRD" not in self.version:
             risk_dct = V2218O1P.get_risk_dct(
